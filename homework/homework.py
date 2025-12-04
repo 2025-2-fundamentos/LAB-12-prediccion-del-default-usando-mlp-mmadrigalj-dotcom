@@ -57,11 +57,7 @@
 # contener las siguientes capas:
 # - Transforma las variables categoricas usando el método
 #   one-hot-encoding.
-# - Descompone la matriz de entrada usando componentes principales.
-#   El pca usa todas las componentes.
-# - Escala la matriz de entrada al intervalo [0, 1].
-# - Selecciona las K columnas mas relevantes de la matrix de entrada.
-# - Ajusta una red neuronal tipo MLP.
+# - Ajusta un modelo de bosques aleatorios (rando forest).
 #
 #
 # Paso 4.
@@ -96,3 +92,169 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import pandas as pd
+import os 
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (precision_score, balanced_accuracy_score,
+                              recall_score, f1_score)
+from sklearn.metrics import confusion_matrix
+import gzip
+import pickle
+import os
+import json
+
+def cargar_datos():
+
+    df_train=pd.read_csv("../files/input/train_data.csv.zip")
+    df_test=pd.read_csv("../files/input/test_data.csv.zip")
+    return df_train, df_test
+
+def limpieza(df):
+    df=df.copy()
+    df=df.rename(columns={"default payment next month":"default"})
+    df=df.drop(columns=["ID"], errors="ignore")
+    df=df.dropna()
+    df=df[(df["EDUCATION"]>0) & (df["MARRIAGE"]>0)]
+    #Se eliminan los valores negativos pues en las instrucciones 
+    # indican que estos valores se convertirian en nulos
+    df.loc[df["EDUCATION"]>=4, "EDUCATION"]=4
+    
+    return df
+
+def separar_datos(base):
+    base=base.copy()
+    x=base
+    y=base.pop("default")
+    return x,y
+
+def hacer_pipeline(estimador):
+    columnas_categoricas=["SEX","EDUCATION","MARRIAGE"]
+
+    preproceso=ColumnTransformer(
+        transformers=[
+            ("ohe",
+             OneHotEncoder(handle_unknown="ignore"),
+             columnas_categoricas),
+        ],
+        remainder="passthrough"
+    )
+
+    pipeline=Pipeline(
+        steps=[
+            ("preproceso",preproceso),
+            ("clasificador",estimador)
+        ]
+    )
+
+    return pipeline
+
+def make_grid_search(estimator, param_grid, cv=10):
+
+    grid_search = GridSearchCV(
+        estimator=estimator,
+        param_grid=param_grid,
+        cv=cv,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        verbose=1
+    )
+
+    return grid_search
+
+def train_random_forest(x_train, y_train, x_test, y_test):
+    rf = RandomForestClassifier(random_state=42)
+
+    pipeline = hacer_pipeline(estimador=rf)
+
+    param_grid = {
+        'clasificador__n_estimators': [50, 100, 200],
+        'clasificador__max_depth': [None, 10, 20],
+        'clasificador__min_samples_split': [2, 5],
+        'clasificador__min_samples_leaf': [1, 2], 
+    }
+
+    grid_search = make_grid_search(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10
+    )
+
+    grid_search.fit(x_train,y_train)
+    return grid_search
+
+def guardar_modelo(modelo):
+    carpeta="../files/models"
+    if not os.path.exists(carpeta):
+        os.makedirs(carpeta)
+
+    nombre = os.path.join(carpeta, "model.pkl.gz")
+    with gzip.open(nombre, 'wb') as f:
+        pickle.dump(modelo, f)
+
+def calculate_metrics(model, X, y, dataset_type):
+
+    y_pred = model.predict(X)
+    
+    return {
+        'type': 'metrics',
+        'dataset': dataset_type,
+        'precision': precision_score(y, y_pred),
+        'balanced_accuracy': balanced_accuracy_score(y, y_pred),
+        'recall': recall_score(y, y_pred),
+        'f1_score': f1_score(y, y_pred)
+    }
+
+def calculate_confusion_matrix(model, X, y, dataset_type):
+    y_pred = model.predict(X)
+    cm = confusion_matrix(y, y_pred)
+    
+    return {
+        'type': 'cm_matrix',
+        'dataset': dataset_type,
+        'true_0': {
+            "predicted_0": int(cm[0,0]), 
+            "predicted_1": int(cm[0,1])
+        },
+        'true_1': {
+            "predicted_0": int(cm[1,0]), 
+            "predicted_1": int(cm[1,1])
+        }
+    }
+
+def guardar_metricas(model, x_train, y_train, x_test, y_test):
+
+    m_train = calculate_metrics(model, x_train, y_train, 'train')
+    m_test  = calculate_metrics(model, x_test, y_test, 'test')
+    
+    cm_train = calculate_confusion_matrix(model, x_train, y_train, 'train')
+    cm_test  = calculate_confusion_matrix(model, x_test, y_test, 'test')
+    
+    resultados = [m_train, m_test, cm_train, cm_test]
+    
+    carpeta = "../files/output"
+    if not os.path.exists(carpeta):
+        os.makedirs(carpeta)
+        
+    ruta_archivo = os.path.join(carpeta, "metrics.json")
+    
+    with open(ruta_archivo, "w") as f:
+        for item in resultados:
+            f.write(json.dumps(item) + "\n")
+
+if __name__ == "__main__":
+    base_train, base_test = cargar_datos()
+
+    base_train = limpieza(base_train)
+    base_test = limpieza(base_test)
+
+    x_train, y_train = separar_datos(base_train)
+    x_test, y_test = separar_datos(base_test)
+
+    estimator = train_random_forest(x_train, y_train, x_test, y_test)
+
+    guardar_modelo(estimator)
+    guardar_metricas(estimator, x_train, y_train, x_test, y_test)
